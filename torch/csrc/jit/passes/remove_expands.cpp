@@ -16,7 +16,7 @@ static void RemoveExpands(Block* block) {
   }
 }
 
-void RemoveExpands(const std::shared_ptr<Graph>& graph) {
+void RemoveExpands(std::shared_ptr<Graph>& graph) {
   RemoveExpands(graph->block());
 }
 

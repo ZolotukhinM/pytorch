@@ -1,6 +1,7 @@
 #pragma once
 
 #include <torch/csrc/jit/ir.h>
+#include <string>
 
 /* `getCustomPasses()` returns a vector of passes that will be executed after
  * differentiation but before any fusion.  This is the de-facto location
@@ -20,6 +21,11 @@ namespace jit {
 using Pass = std::function<void(std::shared_ptr<Graph>&)>;
 
 TORCH_API std::vector<Pass>& getCustomPasses();
+
+TORCH_API void runPass(
+    Pass p,
+    const std::string& passname,
+    std::shared_ptr<Graph>& graph);
 
 struct TORCH_API RegisterPass {
   RegisterPass(Pass p);

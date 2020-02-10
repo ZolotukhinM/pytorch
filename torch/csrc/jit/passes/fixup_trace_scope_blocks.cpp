@@ -488,7 +488,7 @@ void convertTracedForksToRealForks(const std::shared_ptr<Graph>& g) {
 }
 
 // Run a few clean-up passes to make the graph a bit cleaner.
-void runCleanupPasses(const std::shared_ptr<Graph>& g) {
+void runCleanupPasses(std::shared_ptr<Graph>& g) {
   for (Node* n : g->nodes()) {
     if (n->kind() == prim::TracedFork) {
       auto subgraph = n->g(attr::Subgraph);
@@ -516,7 +516,8 @@ void runCleanupPasses(script::Module* m) {
     runCleanupPasses(&module);
   }
   for (auto& method : methods) {
-    runCleanupPasses(method.graph());
+    auto g = method.graph();
+    runCleanupPasses(g);
   }
 }
 

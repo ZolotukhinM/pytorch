@@ -1,8 +1,9 @@
+#include <torch/csrc/jit/passes/lower_tuples.h>
 #include <ATen/core/functional.h>
 #include <c10/util/Exception.h>
-#include <torch/csrc/jit/passes/dead_code_elimination.h>
-#include <torch/csrc/jit/passes/lower_tuples.h>
 #include <torch/csrc/jit/constants.h>
+#include <torch/csrc/jit/pass_manager.h>
+#include <torch/csrc/jit/passes/dead_code_elimination.h>
 
 namespace torch {
 namespace jit {
@@ -230,9 +231,13 @@ void LowerSimpleTuples(Block* block) {
   }
 }
 
-void LowerSimpleTuples(const std::shared_ptr<Graph>& graph) {
+void LowerSimpleTuplesImpl(std::shared_ptr<Graph>& graph) {
   LowerSimpleTuples(graph->block());
   EliminateDeadCode(graph);
+}
+
+void LowerSimpleTuples(std::shared_ptr<Graph>& graph) {
+  runPass(LowerSimpleTuplesImpl, __FILE__, graph);
 }
 } // namespace jit
 } // namespace torch

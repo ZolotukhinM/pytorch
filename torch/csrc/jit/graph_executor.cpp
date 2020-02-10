@@ -558,7 +558,8 @@ struct GraphExecutorImpl : public GraphExecutorImplBase {
     LowerGradOf(*opt_graph);
     specializeAutogradZero(*opt_graph);
     LowerSimpleTuples(opt_graph);
-    ConstantPooling(opt_graph);
+    runPass(ConstantPooling, "constant_pooling", opt_graph);
+    abort();
 
     // Phase 1. Specialize to input definedness (this is very important for
     //          gradient graphs), and run required passes to bring the graph
@@ -652,12 +653,12 @@ GraphExecutorState GraphExecutor::getDebugState() {
   return pImpl->getDebugState();
 }
 
-void runRequiredPasses(const std::shared_ptr<Graph>& g) {
+void runRequiredPasses(std::shared_ptr<Graph>& g) {
   // implicit inserted expand nodes are not necessarily always valid
   // when used inside script methods that might have unstable shapes
   // we remove the implicitly created ones, and have shape analysis
   // add valid expand nodes when the shapes are stable
-  RemoveExpands(g);
+  runPass(RemoveExpands, "qq", g);
   CanonicalizeOps(g);
   EliminateDeadCode(g);
 }

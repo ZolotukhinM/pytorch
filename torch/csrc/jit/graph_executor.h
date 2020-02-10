@@ -68,7 +68,7 @@ struct TORCH_API GraphExecutor {
 
 // These passes need to run before it is valid to pass to the interpreter
 // regardless of whether sizes have been specialized or not.
-TORCH_API void runRequiredPasses(const std::shared_ptr<Graph>& g);
+TORCH_API void runRequiredPasses(std::shared_ptr<Graph>& g);
 
 TORCH_API void debugSetAutodiffSubgraphInlining(bool state);
 TORCH_API std::shared_ptr<Graph> lastExecutedOptimizedGraph();
