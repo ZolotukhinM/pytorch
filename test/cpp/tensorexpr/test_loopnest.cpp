@@ -5,6 +5,7 @@
 #include "test/cpp/tensorexpr/test_base.h"
 
 #include "test/cpp/tensorexpr/padded_buffer.h"
+#include "torch/csrc/jit/tensorexpr/bounds_inference.h"
 #include "torch/csrc/jit/tensorexpr/buffer.h"
 #include "torch/csrc/jit/tensorexpr/eval.h"
 #include "torch/csrc/jit/tensorexpr/function.h"
@@ -544,6 +545,110 @@ void testScheduleDynamicShape2D() {
   testWithSize(1, 8);
   testWithSize(16, 32);
   testWithSize(37, 11);
+}
+
+void testScheduleBoundsInference() {
+  KernelScope kernel_scope;
+#if 0
+  {
+    VarHandle m("m", kInt);
+    VarHandle n("n", kInt);
+    Buffer a(VarHandle("a", kHandle), kFloat, {m, ExprHandle(100)});
+    Tensor* c = Compute(
+        "c", {{m, "m"}, {ExprHandle(100), "n"}}, [&](const VarHandle& i, const VarHandle& j) {
+          return a(i, j + 1) + a(i + 1, j);
+        });
+    LoopNest l({c});
+    std::vector<For*> loops = l.getLoopStmtsFor(c);
+    inferBounds(loops[0]);
+  }
+  {
+    std::cerr << "==============================\n";
+    VarHandle m("m", kInt);
+    VarHandle n("n", kInt);
+    Buffer a(VarHandle("a", kHandle), kFloat, {m, ExprHandle(100)});
+    Tensor* c = Compute(
+        "c", {{m, "m"}, {ExprHandle(100), "n"}}, [&](const VarHandle& i, const VarHandle& j) {
+          return a(i, j + 1) + a(i + 1, j);
+        });
+    LoopNest l({c});
+    std::vector<For*> loops = l.getLoopStmtsFor(c);
+    For* x_outer;
+    For* x_inner;
+    For* x_tail;
+    l.SplitWithTail(loops[0], 4, &x_outer, &x_inner, &x_tail);
+    inferBounds(x_inner);
+    inferBounds(x_tail);
+  }
+  {
+    std::cerr << "---------------------------------\n";
+    VarHandle m("m", kInt);
+    VarHandle n("n", kInt);
+    Buffer a(VarHandle("a", kHandle), kFloat, {m, ExprHandle(100)});
+    Tensor* d = Compute(
+        "d",
+        {{m, "m"}, {ExprHandle(100), "n"}},
+        [&](const VarHandle& i, const VarHandle& j) { return i + j; });
+    Tensor* c = Compute(
+        "c",
+        {{m, "m"}, {ExprHandle(100), "n"}},
+        [&](const VarHandle& i, const VarHandle& j) {
+          return d->call(i, j) + d->call(i + 1, j) + d->call(i, j + 1) +
+              d->call(i + 1, j + 1);
+        });
+    LoopNest l({c});
+    std::vector<For*> loops = l.getLoopStmtsFor(c);
+    std::cerr << "****\n" << *l.root_stmt() << "\n";
+    l.computeAt(l.getLoopBodyFor(d), loops[1]);
+    std::cerr << "****\n" << *l.root_stmt() << "\n";
+  }
+#endif
+  {
+    std::cerr << "---------------------------------\n";
+    VarHandle W("W", kInt);
+    VarHandle H("H", kInt);
+    Tensor* p = Compute(
+        "p",
+        {{W + 1, "px"}, {H + 1, "py"}},
+        [&](const VarHandle& px, const VarHandle& py) { return px * py; });
+    Tensor* c = Compute(
+        "c",
+        {{W, "cx"}, {H, "cy"}},
+        [&](const VarHandle& x, const VarHandle& y) {
+          return p->call(x, y) + p->call(x + 1, y) + p->call(x, y + 1) +
+              p->call(x + 1, y + 1);
+        });
+    LoopNest l({c});
+    std::vector<For*> loops = l.getLoopStmtsFor(c);
+    std::cerr << "****\n" << *l.root_stmt() << "\n";
+    std::cerr << "****\nLoop0:\n" << *loops[0] << "\n";
+    std::cerr << "****\nLoop1:\n" << *loops[1] << "\n";
+    l.computeAt(l.getLoopBodyFor(p), loops[0]);
+    std::cerr << "****\n" << *l.root_stmt() << "\n";
+  }
+  {
+    std::cerr << "---------------------------------\n";
+    ExprHandle W(100);
+    ExprHandle H(200);
+    Tensor* p = Compute(
+        "p",
+        {{W + 1, "px"}, {H + 1, "py"}},
+        [&](const VarHandle& px, const VarHandle& py) { return px * py; });
+    Tensor* c = Compute(
+        "c",
+        {{W, "cx"}, {H, "cy"}},
+        [&](const VarHandle& x, const VarHandle& y) {
+          return p->call(x, y) + p->call(x + 1, y) + p->call(x, y + 1) +
+              p->call(x + 1, y + 1);
+        });
+    LoopNest l({c});
+    std::vector<For*> loops = l.getLoopStmtsFor(c);
+    std::cerr << "****\n" << *l.root_stmt() << "\n";
+    std::cerr << "****\nLoop0:\n" << *loops[0] << "\n";
+    std::cerr << "****\nLoop1:\n" << *loops[1] << "\n";
+    l.computeAt(l.getLoopBodyFor(p), loops[1]);
+    std::cerr << "****\n" << *l.root_stmt() << "\n";
+  }
 }
 
 } // namespace jit
