@@ -5,6 +5,7 @@
 #include "test/cpp/tensorexpr/test_base.h"
 
 #include "test/cpp/tensorexpr/padded_buffer.h"
+#include "torch/csrc/jit/tensorexpr/bounds_inference.h"
 #include "torch/csrc/jit/tensorexpr/buffer.h"
 #include "torch/csrc/jit/tensorexpr/eval.h"
 #include "torch/csrc/jit/tensorexpr/function.h"
@@ -544,6 +545,286 @@ void testScheduleDynamicShape2D() {
   testWithSize(1, 8);
   testWithSize(16, 32);
   testWithSize(37, 11);
+}
+
+static std::unordered_map<const Buf*, TensorAccessBoundsInfo>
+convertBoundsInfoToMap(const std::vector<TensorAccessBoundsInfo>& v) {
+  std::unordered_map<const Buf*, TensorAccessBoundsInfo> res;
+  for (const auto& el : v) {
+    res[el.buf] = el;
+  }
+  return res;
+}
+
+static void verifyConstBounds(
+    const TensorAccessBoundsInfo& access_info,
+    const std::vector<std::pair<int, int>>& ref) {
+  size_t ndim = ref.size();
+  ASSERT_EQ(access_info.start.size(), ndim);
+  ASSERT_EQ(access_info.stop.size(), ndim);
+  for (size_t i = 0; i < ndim; i++) {
+    if (ref[i].first >= 0) { // Negative values are used to skip the check
+      auto start_imm = dynamic_cast<const IntImm*>(access_info.start[i]);
+      ASSERT_TRUE(start_imm);
+      ASSERT_EQ(start_imm->value(), ref[i].first);
+    }
+    if (ref[i].second >= 0) {
+      auto stop_imm = dynamic_cast<const IntImm*>(access_info.stop[i]);
+      ASSERT_TRUE(stop_imm);
+      ASSERT_EQ(stop_imm->value(), ref[i].second);
+    }
+  }
+}
+
+void testBoundsInference_1() {
+  // Verify that bounds inference works for the following example:
+  // for i in 0..100:
+  //   b[i] = a[i]
+  // For this loop bounds inference should yield the following:
+  // {{b, kStore, 0, 99}, {a, kLoad, 0, 99}}
+  KernelScope kernel_scope;
+  ExprHandle n(100);
+  Buffer a(BufHandle("a", {n}), kFloat);
+  Tensor* b =
+      Compute("b", {{n, "i"}}, [&](const VarHandle& i) { return a(i); });
+  LoopNest l({b});
+  const std::vector<TensorAccessBoundsInfo>& bounds_info =
+      inferBounds(l.root_stmt());
+  auto bounds_info_map = convertBoundsInfoToMap(bounds_info);
+
+  // We should have two entries: one for 'b' and one for 'a'.
+  ASSERT_EQ(bounds_info_map.size(), 2);
+  ASSERT_EQ(bounds_info_map.at(a.data()).kind, kLoad);
+  verifyConstBounds(bounds_info_map.at(a.data()), {{0, 99}});
+  ASSERT_EQ(bounds_info_map.at(b->buf()).kind, kStore);
+  verifyConstBounds(bounds_info_map.at(b->buf()), {{0, 99}});
+}
+
+void testBoundsInference_2() {
+  // Verify that bounds inference works for the following example:
+  // for i in 0..n:
+  //   b[i] = a[i]
+  // For this loop bounds inference should yield the following:
+  // {{b, kStore, 0, n-1}, {a, kLoad, 0, n-1}}
+  KernelScope kernel_scope;
+  VarHandle n("n", kInt);
+  Buffer a(BufHandle("a", {n}), kFloat);
+  Tensor* b =
+      Compute("b", {{n, "i"}}, [&](const VarHandle& i) { return a(i); });
+  LoopNest l({b});
+  const std::vector<TensorAccessBoundsInfo>& bounds_info =
+      inferBounds(l.root_stmt());
+  auto bounds_info_map = convertBoundsInfoToMap(bounds_info);
+
+  // We should have two entries: one for 'b' and one for 'a'.
+  ASSERT_EQ(bounds_info_map.size(), 2);
+  ASSERT_EQ(bounds_info_map.at(a.data()).kind, kLoad);
+  verifyConstBounds(bounds_info_map.at(a.data()), {{0, -1}});
+  ASSERT_EQ(bounds_info_map.at(b->buf()).kind, kStore);
+  verifyConstBounds(bounds_info_map.at(b->buf()), {{0, -1}});
+}
+
+void testBoundsInference_3() {
+  // Verify that bounds inference works for the following example:
+  // for i in 0..100:
+  //   b[i] = a[i] * a[i+10]
+  // For this loop bounds inference should yield the following:
+  // {{b, kStore, 0, 99}, {a, kLoad, 0, 109}}
+  KernelScope kernel_scope;
+  ExprHandle n(100);
+  Buffer a(BufHandle("a", {n + 10}), kFloat);
+  Tensor* b = Compute(
+      "b", {{n, "i"}}, [&](const VarHandle& i) { return a(i) * a(i + 10); });
+  LoopNest l({b});
+  const std::vector<TensorAccessBoundsInfo>& bounds_info =
+      inferBounds(l.root_stmt());
+  auto bounds_info_map = convertBoundsInfoToMap(bounds_info);
+
+  // We should have two entries: one for 'b' and one for 'a'.
+  ASSERT_EQ(bounds_info_map.size(), 2);
+  ASSERT_EQ(bounds_info_map.at(a.data()).kind, kLoad);
+  verifyConstBounds(bounds_info_map.at(a.data()), {{0, 109}});
+  ASSERT_EQ(bounds_info_map.at(b->buf()).kind, kStore);
+  verifyConstBounds(bounds_info_map.at(b->buf()), {{0, 99}});
+}
+
+void testBoundsInference_4() {
+  // Verify that bounds inference works for the following example:
+  //
+  // for y in 0..200:
+  //   for x in 0..320:
+  //     b[y,x] = x*y
+  // for y in 0..200:
+  //   for x in 0..320:
+  //     c[y,x] = a[y,x] * b[y,x]
+  KernelScope kernel_scope;
+  ExprHandle W(320);
+  ExprHandle H(200);
+  Buffer a(BufHandle("a", {H, W}), kFloat);
+  Tensor* b = Compute(
+      "b", {{H, "y"}, {W, "x"}}, [&](const VarHandle& y, const VarHandle& x) {
+        return x * y;
+      });
+  Tensor* c = Compute(
+      "c", {{H, "y"}, {W, "x"}}, [&](const VarHandle& y, const VarHandle& x) {
+        return a(y, x) * b->call(y, x);
+      });
+  LoopNest l({c});
+  std::vector<For*> loops = l.getLoopStmtsFor(c);
+  Stmt* body = l.getLoopBodyFor(c);
+  {
+    // Infer bounds on the top-level loop scope
+    const std::vector<TensorAccessBoundsInfo>& bounds_info =
+        inferBounds(loops[0]);
+    auto bounds_info_map = convertBoundsInfoToMap(bounds_info);
+
+    ASSERT_EQ(bounds_info_map.at(a.data()).kind, kLoad);
+    verifyConstBounds(bounds_info_map.at(a.data()), {{0, 199}, {0, 319}});
+
+    ASSERT_EQ(bounds_info_map.at(b->buf()).kind, kLoad);
+    verifyConstBounds(bounds_info_map.at(b->buf()), {{0, 199}, {0, 319}});
+
+    ASSERT_EQ(bounds_info_map.at(c->buf()).kind, kStore);
+    verifyConstBounds(bounds_info_map.at(c->buf()), {{0, 199}, {0, 319}});
+  }
+  {
+    // Infer bounds on the inner loop scope
+    const std::vector<TensorAccessBoundsInfo>& bounds_info =
+        inferBounds(loops[1]);
+    auto bounds_info_map = convertBoundsInfoToMap(bounds_info);
+
+    ASSERT_EQ(bounds_info_map.at(a.data()).kind, kLoad);
+    verifyConstBounds(bounds_info_map.at(a.data()), {{-1, -1}, {0, 319}});
+
+    ASSERT_EQ(bounds_info_map.at(b->buf()).kind, kLoad);
+    verifyConstBounds(bounds_info_map.at(b->buf()), {{-1, -1}, {0, 319}});
+
+    ASSERT_EQ(bounds_info_map.at(c->buf()).kind, kStore);
+    verifyConstBounds(bounds_info_map.at(c->buf()), {{-1, -1}, {0, 319}});
+  }
+  {
+    // Infer bounds on the inner loop body's scope
+    const std::vector<TensorAccessBoundsInfo>& bounds_info =
+        inferBounds(body);
+    auto bounds_info_map = convertBoundsInfoToMap(bounds_info);
+
+    ASSERT_EQ(bounds_info_map.at(a.data()).kind, kLoad);
+    verifyConstBounds(bounds_info_map.at(a.data()), {{-1, -1}, {-1, -1}});
+
+    ASSERT_EQ(bounds_info_map.at(b->buf()).kind, kLoad);
+    verifyConstBounds(bounds_info_map.at(b->buf()), {{-1, -1}, {-1, -1}});
+
+    ASSERT_EQ(bounds_info_map.at(c->buf()).kind, kStore);
+    verifyConstBounds(bounds_info_map.at(c->buf()), {{-1, -1}, {-1, -1}});
+  }
+}
+
+void testBoundsInference_5() {
+  // Verify that bounds inference works for the following example:
+  // for i in 0..100:
+  //   b[i] = a[i]
+  //
+  // ==> split ==>
+  //
+  // for i_outer in 0..100/16:
+  //   for i_inner in 0..16:
+  //     b[i_outer * 16 + i_inner] = a[i_outer * 16 + i_inner]
+  // for i_tail in 0..100%16:
+  //   b[i_tail + (100/16)*16] = a[i_tail + (100/16)*16];
+  KernelScope kernel_scope;
+  ExprHandle n(100);
+  Buffer a(BufHandle("a", {n}), kFloat);
+  Tensor* b =
+      Compute("b", {{n, "i"}}, [&](const VarHandle& i) { return a(i); });
+  LoopNest l({b});
+
+  For* outer;
+  For* inner;
+  For* tail;
+  std::vector<For*> loops = l.getLoopStmtsFor(b);
+  l.splitWithTail(loops[0], 16, &outer, &inner, &tail);
+
+  {
+    // Verify inferred bounds for the outer loop
+    const std::vector<TensorAccessBoundsInfo>& bounds_info = inferBounds(outer);
+    auto bounds_info_map = convertBoundsInfoToMap(bounds_info);
+    ASSERT_EQ(bounds_info_map.size(), 2);
+    ASSERT_EQ(bounds_info_map.at(a.data()).kind, kLoad);
+    verifyConstBounds(bounds_info_map.at(a.data()), {{0, 95}});
+    ASSERT_EQ(bounds_info_map.at(b->buf()).kind, kStore);
+    verifyConstBounds(bounds_info_map.at(b->buf()), {{0, 95}});
+  }
+  {
+    // Verify inferred bounds for the tail loop
+    const std::vector<TensorAccessBoundsInfo>& bounds_info = inferBounds(tail);
+    auto bounds_info_map = convertBoundsInfoToMap(bounds_info);
+    ASSERT_EQ(bounds_info_map.at(a.data()).kind, kLoad);
+    verifyConstBounds(bounds_info_map.at(a.data()), {{96, 99}});
+    ASSERT_EQ(bounds_info_map.at(b->buf()).kind, kStore);
+    verifyConstBounds(bounds_info_map.at(b->buf()), {{96, 99}});
+  }
+}
+
+void testLoopNestComputeAt_1() {
+  KernelScope kernel_scope;
+  {
+    std::cerr << "---------------------------------\n";
+    VarHandle W("W", kInt);
+    VarHandle H("H", kInt);
+    Tensor* p = Compute(
+        "p",
+        {{H + 1, "py"}, {W + 1, "px"}},
+        [&](const VarHandle& py, const VarHandle& px) { return px * py; });
+    Tensor* c = Compute(
+        "c",
+        {{H, "cy"}, {W, "cx"}},
+        [&](const VarHandle& y, const VarHandle& x) {
+          return p->call(y, x) + p->call(y + 1, x) + p->call(y, x + 1) +
+              p->call(y + 1, x + 1);
+        });
+    LoopNest l({c});
+    std::vector<For*> loops = l.getLoopStmtsFor(c);
+    std::cerr << "****\n" << *l.root_stmt() << "\n";
+    std::cerr << "****\nLoop0:\n" << *loops[0] << "\n";
+    std::cerr << "****\nLoop1:\n" << *loops[1] << "\n";
+    l.computeAt(l.getLoopBodyFor(p), loops[0]);
+    std::cerr << "****\n" << *l.root_stmt() << "\n";
+  }
+  {
+    std::cerr << "---------------------------------\n";
+    ExprHandle W(100);
+    ExprHandle H(200);
+    Tensor* p = Compute(
+        "p",
+        {{H + 1, "py"}, {W + 1, "px"}},
+        [&](const VarHandle& py, const VarHandle& px) { return px * py; });
+    Tensor* c = Compute(
+        "c",
+        {{H, "cy"}, {W, "cx"}},
+        [&](const VarHandle& y, const VarHandle& x) {
+          return p->call(y, x) + p->call(y + 1, x) + p->call(y, x + 1) +
+              p->call(y + 1, x + 1);
+        });
+    LoopNest l({c});
+    std::vector<For*> loops = l.getLoopStmtsFor(c);
+    std::cerr << "****\n" << *l.root_stmt() << "\n";
+    std::cerr << "****\nLoop0:\n" << *loops[0] << "\n";
+    std::cerr << "****\nLoop1:\n" << *loops[1] << "\n";
+    l.computeAt(l.getLoopBodyFor(p), loops[1]);
+    std::cerr << "****\n" << *l.root_stmt() << "\n";
+  }
+}
+void testLoopNestComputeAt_2() {
+  KernelScope kernel_scope;
+}
+void testLoopNestComputeAt_3() {
+  KernelScope kernel_scope;
+}
+void testLoopNestComputeAt_4() {
+  KernelScope kernel_scope;
+}
+void testLoopNestComputeAt_5() {
+  KernelScope kernel_scope;
 }
 
 } // namespace jit
