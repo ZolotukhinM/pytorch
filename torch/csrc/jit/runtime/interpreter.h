@@ -120,6 +120,31 @@ struct InterpreterContinuation {
 #endif
 };
 
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+struct IRInterpreterStateImpl;
+struct IRInterpreterState {
+  TORCH_API IRInterpreterState(const std::shared_ptr<Graph>& graph);
+  TORCH_API void run(Stack& stack);
+  TORCH_API ~IRInterpreterState();
+
+ private:
+  IRInterpreterState(c10::intrusive_ptr<c10::intrusive_ptr_target> pImpl);
+  c10::intrusive_ptr<c10::intrusive_ptr_target> pImpl;
+  friend struct IRInterpreterStateImpl;
+};
+
+
 // what is the tensors type, including state from the current execution context
 // that modifies how the tensor behaves. For instance if no_grad is enabled
 // this will cause the TensorType to have requires_grad=False.

@@ -1565,5 +1565,215 @@ void InterpreterContinuation::operator()() {
   DistAutogradContainer::forceCurrentContextId(prev_dist_id);
 #endif
 }
+
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+struct IRInterpreterStateImpl : c10::intrusive_ptr_target {
+  IRInterpreterStateImpl(const std::shared_ptr<Graph>& graph) : graph_(graph) {}
+
+ private:
+  std::vector<IValue> registers;
+  std::shared_ptr<Graph> graph_;
+
+  std::unordered_map<Value*, IValue> values_;
+
+  // saved-by-value stuff that can exist on the stack inside runInterpreter
+
+  c10::intrusive_ptr<IRInterpreterStateImpl> intrusive_from_this() {
+    c10::raw::intrusive_ptr::incref(this);
+    return c10::intrusive_ptr<IRInterpreterStateImpl>::reclaim(this);
+  }
+
+  void dump(std::ostream& out, const Stack& stack) const {
+    out << "Stack:\n";
+    for (const auto& val : stack) {
+      out << val;
+      out << "\n";
+    }
+  }
+
+  void executeBlock(Block *block) {
+    GRAPH_DEBUG("BLOCK\n");
+    for (auto node : block->nodes()) {
+      executeNode(node);
+    }
+  }
+  void recValue(Value* v, const IValue& iv) {
+    GRAPH_DEBUG("VALUE: %", v->debugName(), " = ", iv, "\n");
+    values_[v] = iv;
+  }
+
+  void executeConstantNode(Node * node) {
+    if (node->output()->type()->kind() == FunctionType::Kind) {
+      return;
+    }
+    GRAPH_DEBUG("CONSTANT: ", *node);
+    recValue(node->output(), toIValue(node->output()).value());
+  }
+
+  void executeOpNode(Node * node) {
+    GRAPH_DEBUG("OTHER: ", *node);
+    const Operator& op = node->getOperator();
+    std::vector<IValue> args;
+    for (auto i : node->inputs()) {
+      args.push_back(values_.at(i));
+    }
+    if (op.hasOperation() && op.schema().is_vararg()) {
+      args.push_back(c10::IValue{static_cast<int64_t>(node->inputs().size())});
+    }
+    op.getOperation(node)(args);
+    size_t idx = 0;
+    for (auto i : node->outputs()) {
+      recValue(i, args[args.size() - node->outputs().size() + idx++]);
+    }
+  }
+  void executeLoopNode(Node* node) {
+    GRAPH_DEBUG("LOOP: ", *node);
+    int64_t trip_count = 0;
+    int64_t max_trip_count = values_.at(node->input(0)).toInt();
+    bool cond = values_.at(node->input(1)).toBool();
+    while (trip_count < max_trip_count && cond) {
+//       std::cerr << " iter: " << trip_count << " max iter: " << max_trip_count
+//                 << " cond: " << (int)cond << "\n";
+
+      recValue(node->blocks().at(0)->inputs().at(0), c10::IValue{static_cast<int64_t>(trip_count)});
+
+      executeBlock(node->blocks().at(0));
+      cond = values_.at(node->input(1)).toBool();
+      trip_count++;
+    }
+    GRAPH_DEBUG(
+        "LOOP ENDED\niter: ",
+        trip_count,
+        " max iter: ",
+        max_trip_count,
+        " cond: ",
+        (int)cond,
+        "\n");
+  }
+
+  void executeNode(Node *node) {
+    switch(node->kind()) {
+      case prim::Constant:
+        executeConstantNode(node);
+        break;
+      case prim::Return:
+//         std::cerr << "RETURN: " << *node << "\n";
+        break;
+      case prim::Loop:
+        executeLoopNode(node);
+        break;
+      default:
+        executeOpNode(node);
+//        op.getOperation(node)
+//        node->getOperator()
+
+//         if (!preprocess_.can_emit_inline[node]) {
+//           emitNode(node);
+//           emitStoreOutputs(node);
+//         }
+        break;
+    }
+  }
+
+  bool runImpl(Stack& stack) {
+    size_t idx = 0;
+    for (auto i : graph_->inputs()) {
+      recValue(i, stack[stack.size() - graph_->inputs().size() + idx++]);
+    }
+    executeBlock(graph_->block());
+    return true;
+  }
+
+  void formatStackTrace(std::ostream& out) {
+#if 0
+    std::vector<StackEntry> entries;
+    for (size_t i = 0; i < frames.size(); ++i) {
+      const Frame& frame = frames[i];
+      std::string previous_fn_name = frame.function->function_name_;
+      size_t pc = frame.pc;
+      // CALL nodes have already advanced the pc, so
+      // undo that to report the call node
+      if (i + 1 < frames.size()) {
+        --pc;
+      }
+
+      Node* node = frame.function->instructions_source_[pc];
+      if (node->callstack()) {
+        for (const auto& p : (*node->callstack())->vec()) {
+          entries.emplace_back(StackEntry{previous_fn_name, p.second});
+          previous_fn_name = p.first->name();
+        }
+      }
+      entries.emplace_back(StackEntry{previous_fn_name, node->sourceRange()});
+    }
+    format_stack_trace(out, entries);
+#endif
+  }
+
+  void handleError(const ExceptionMessage& msg, bool is_jit_exception) {
+    std::ostringstream ss;
+    ss << "The following operation failed in the TorchScript interpreter.\n";
+    formatStackTrace(ss);
+    ss << "RuntimeError: " << msg << "\n";
+#if 0
+    if (future_) {
+      future_->setError(Future::FutureError(ss.str()));
+    } else if (is_jit_exception) {
+      throw JITException(ss.str());
+    } else {
+      throw std::runtime_error(ss.str());
+    }
+#endif
+  }
+
+ public:
+
+  void run(Stack& stack) {
+    runImpl(stack);
+#if 0
+    if (runImpl(stack)) {
+      future_->wait();
+
+      auto num_outputs = frames.front().function->n_outputs;
+      if (num_outputs == 1) {
+        push(stack, future_->value());
+      } else {
+        auto tuple = future_->value().toTuple();
+        for (const IValue& value : tuple->elements()) {
+          push(stack, value);
+        }
+      }
+    }
+#endif
+  }
+};
+
+IRInterpreterState::IRInterpreterState(const std::shared_ptr<Graph>& graph)
+    : pImpl(c10::make_intrusive<IRInterpreterStateImpl>(graph)) {}
+
+IRInterpreterState::~IRInterpreterState() = default;
+
+void IRInterpreterState::run(Stack& stack) {
+  static_cast<IRInterpreterStateImpl*>(pImpl.get())->run(stack);
+}
+
+IRInterpreterState::IRInterpreterState(
+    c10::intrusive_ptr<c10::intrusive_ptr_target> pImpl_)
+    : pImpl(std::move(pImpl_)) {}
+
+
+
 } // namespace jit
 } // namespace torch
