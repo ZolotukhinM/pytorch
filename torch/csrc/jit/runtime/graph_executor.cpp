@@ -464,6 +464,16 @@ GraphExecutor* getGradExecutor(Operation& op) {
 }
 } // namespace detail
 
+bool newInterpreterEnabled() {
+  static const char* enable_c_str = std::getenv("PYTORCH_NEW_INTERPRETER");
+  if (!enable_c_str) {
+    return false;
+  }
+  if (std::string(enable_c_str) == "0") {
+    return false;
+  }
+  return true;
+}
 void GraphExecutorImplBase::run(Stack& stack) {
   TORCH_CHECK(
       stack.size() >= num_inputs,
@@ -479,8 +489,11 @@ void GraphExecutorImplBase::run(Stack& stack) {
   ExecutionPlan plan =
       getPlanFor(stack, GraphExecutor::getDefaultNumBailOuts());
   Stack shadow_stack(stack);
-  IRInterpreterState(plan.graph).run(shadow_stack);
-  InterpreterState(plan.code).run(stack);
+  if (newInterpreterEnabled()) {
+    IRInterpreterState(plan.graph).run(stack);
+  } else {
+    InterpreterState(plan.code).run(stack);
+  }
   last_executed_optimized_graph = plan.graph;
 }
 

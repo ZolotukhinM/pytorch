@@ -1587,6 +1587,8 @@ struct IRInterpreterStateImpl : c10::intrusive_ptr_target {
   std::shared_ptr<Graph> graph_;
 
   std::unordered_map<Value*, IValue> values_;
+  std::unordered_map<Node*, Operation> operator_table_;
+  std::unordered_set<Node*> vararg_operators_;
 
   // saved-by-value stuff that can exist on the stack inside runInterpreter
 
@@ -1603,15 +1605,25 @@ struct IRInterpreterStateImpl : c10::intrusive_ptr_target {
     }
   }
 
-  void executeBlock(Block *block) {
+  void executeBlock(Block *block)  __attribute__((always_inline)){
     GRAPH_DEBUG("BLOCK\n");
     for (auto node : block->nodes()) {
       executeNode(node);
     }
   }
-  void recValue(Value* v, const IValue& iv) {
-    GRAPH_DEBUG("VALUE: %", v->debugName(), " = ", iv, "\n");
+  void recValue(Value* v, const IValue& iv) __attribute__((always_inline)) {
+//     if (iv.isTensor() || iv.isTensorList()) {
+//       GRAPH_DEBUG("VALUE: %", v->debugName(), " = <...>\n");
+//     } else {
+//       GRAPH_DEBUG("VALUE: %", v->debugName(), " = ", iv, "\n");
+//     }
     values_[v] = iv;
+  }
+  IValue getValue(Value* v) __attribute__((always_inline)) {
+//     if (!values_.count(v)) {
+//       GRAPH_DEBUG("ERROR: Trying to access value: %", v->debugName(), ", which is not present!\n");
+//     }
+    return values_.at(v);
   }
 
   void executeConstantNode(Node * node) {
@@ -1622,37 +1634,52 @@ struct IRInterpreterStateImpl : c10::intrusive_ptr_target {
     recValue(node->output(), toIValue(node->output()).value());
   }
 
-  void executeOpNode(Node * node) {
+  void executeOpNode(Node * node)  __attribute__((always_inline)) {
     GRAPH_DEBUG("OTHER: ", *node);
-    const Operator& op = node->getOperator();
-    std::vector<IValue> args;
-    for (auto i : node->inputs()) {
-      args.push_back(values_.at(i));
+    if (!operator_table_.count(node)) {
+      const Operator& op = node->getOperator();
+      operator_table_[node] = op.getOperation(node);
+      if (op.hasOperation() && op.schema().is_vararg()) {
+        vararg_operators_.insert(node);
+      }
     }
-    if (op.hasOperation() && op.schema().is_vararg()) {
+
+    std::vector<IValue> args;
+    args.reserve(node->inputs().size() + 1);
+    for (auto i : node->inputs()) {
+      args.push_back(getValue(i));
+    }
+    if (vararg_operators_.count(node)) {
       args.push_back(c10::IValue{static_cast<int64_t>(node->inputs().size())});
     }
-    op.getOperation(node)(args);
-    size_t idx = 0;
-    for (auto i : node->outputs()) {
-      recValue(i, args[args.size() - node->outputs().size() + idx++]);
+    operator_table_.at(node)(args);
+    for (size_t idx = 0; idx < node->outputs().size(); idx++) {
+      recValue(node->output(idx), args[idx]);
     }
   }
+
   void executeLoopNode(Node* node) {
     GRAPH_DEBUG("LOOP: ", *node);
     int64_t trip_count = 0;
-    int64_t max_trip_count = values_.at(node->input(0)).toInt();
-    bool cond = values_.at(node->input(1)).toBool();
+    int64_t max_trip_count = getValue(node->input(0)).toInt();
+    bool cond = getValue(node->input(1)).toBool();
+    Block* body = node->blocks().at(0);
+    for (size_t idx = 2; idx < node->inputs().size(); idx++) {
+      recValue(body->inputs().at(idx - 1), getValue(node->input(idx)));
+    }
     while (trip_count < max_trip_count && cond) {
 //       std::cerr << " iter: " << trip_count << " max iter: " << max_trip_count
 //                 << " cond: " << (int)cond << "\n";
+      recValue(body->inputs().at(0), c10::IValue{static_cast<int64_t>(trip_count)});
 
-      recValue(node->blocks().at(0)->inputs().at(0), c10::IValue{static_cast<int64_t>(trip_count)});
-
-      executeBlock(node->blocks().at(0));
-      cond = values_.at(node->input(1)).toBool();
+      executeBlock(body);
+      cond = getValue(node->input(1)).toBool();
       trip_count++;
     }
+    for (size_t idx = 0; idx < node->outputs().size(); idx++) {
+      recValue(node->output(idx), getValue(body->outputs().at(idx + 1)));
+    }
+
     GRAPH_DEBUG(
         "LOOP ENDED\niter: ",
         trip_count,
@@ -1661,6 +1688,21 @@ struct IRInterpreterStateImpl : c10::intrusive_ptr_target {
         " cond: ",
         (int)cond,
         "\n");
+  }
+  void executeProfileNode(Node* node) {
+    GRAPH_DEBUG("PROFILE: ", *node);
+    if (node->inputs().size() == 1) {
+      recValue(node->output(), getValue(node->input()));
+    }
+  }
+  void executeTupleConstructNode(Node* node) {
+    GRAPH_DEBUG("TUPLE_CONSTRUCT: ", *node);
+    std::vector<IValue> elems;
+    elems.reserve(node->inputs().size());
+    for (auto i : node->inputs()) {
+      elems.push_back(getValue(i));
+    }
+    recValue(node->output(), c10::ivalue::Tuple::create(std::move(elems)));
   }
 
   void executeNode(Node *node) {
@@ -1671,8 +1713,14 @@ struct IRInterpreterStateImpl : c10::intrusive_ptr_target {
       case prim::Return:
 //         std::cerr << "RETURN: " << *node << "\n";
         break;
+      case prim::profile:
+        executeProfileNode(node);
+        break;
       case prim::Loop:
         executeLoopNode(node);
+        break;
+      case prim::TupleConstruct:
+        executeTupleConstructNode(node);
         break;
       default:
         executeOpNode(node);
@@ -1688,11 +1736,16 @@ struct IRInterpreterStateImpl : c10::intrusive_ptr_target {
   }
 
   bool runImpl(Stack& stack) {
+    GRAPH_DUMP("INTERPRETING: ", graph_);
     size_t idx = 0;
     for (auto i : graph_->inputs()) {
       recValue(i, stack[stack.size() - graph_->inputs().size() + idx++]);
     }
     executeBlock(graph_->block());
+    drop(stack, graph_->inputs().size());
+    for (size_t idx = 0; idx < graph_->block()->outputs().size(); idx++) {
+      stack.push_back(getValue(graph_->block()->outputs().at(idx)));
+    }
     return true;
   }
 
