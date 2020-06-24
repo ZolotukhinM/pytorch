@@ -23,6 +23,7 @@
 #include <torch/csrc/jit/passes/requires_grad_analysis.h>
 #include <torch/csrc/jit/passes/shape_analysis.h>
 #include <torch/csrc/jit/passes/specialize_autogradzero.h>
+#include <torch/csrc/jit/passes/tensorexpr_fuser.h>
 
 C10_DECLARE_bool();
 
@@ -87,10 +88,14 @@ void ProfilingGraphExecutorImpl::runProfilingOptimizations(
     return;
   }
 
+  runOptimization(copy, false);
+  if (tensorExprFuserEnabled()) {
+    FuseTensorExprs(copy);
+  }
   InsertGuards(copy);
   LowerGradOf(*copy);
-  EliminateRedundantGuards(copy);
-  InsertBailOuts(copy);
+//   EliminateRedundantGuards(copy);
+//   InsertBailOuts(copy);
   GRAPH_DUMP("After InsertBailOuts: ", copy);
   specializeAutogradZero(*copy);
 
@@ -99,7 +104,7 @@ void ProfilingGraphExecutorImpl::runProfilingOptimizations(
   ConstantPropagation(copy);
   runOptimization(copy);
 
-  if (needsGradientInProfilingMode(copy->block())) {
+  if (false && needsGradientInProfilingMode(copy->block())) {
     auto diff_nodes = CreateAutodiffSubgraphs(
         copy,
         getAutodiffSubgraphInlining() ? autodiffSubgraphNodeThreshold : 1);

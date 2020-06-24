@@ -82,10 +82,11 @@ static constexpr size_t min_fusion_size = 4;
 
 bool have_same_shape(at::TensorList inputs) {
   auto expected_sizes = inputs[0].sizes();
-  return (std::all_of(
+  bool rv = (std::all_of(
       inputs.begin(), inputs.end(), [expected_sizes](const at::Tensor& t) {
         return t.sizes() == expected_sizes;
       }));
+  return rv;
 }
 
 bool should_be_transposed(at::TensorList inputs) {
@@ -367,6 +368,7 @@ RegisterOperators mm_batch_side_reg({Operator(
 std::pair<std::vector<Node*>, std::vector<Node*>> gatherIndependentMMUses(
     Value* value,
     AliasDb& alias_db) {
+  std::cerr << "Gather independent MMUses for %" << value->debugName() << "\n";
   const auto postprocess = [&](std::vector<Node*> mms) {
     if (mms.size() == 0) {
       return mms;
@@ -384,6 +386,7 @@ std::pair<std::vector<Node*>, std::vector<Node*>> gatherIndependentMMUses(
         if (mms[j] == nullptr)
           continue;
         if (!alias_db.couldMoveBeforeTopologically(mms[j], mms[i])) {
+          std::cerr << "Cannot move " << *mms[j] << " to " << *mms[i] << "\n";
           mms[j] = nullptr;
         }
       }
@@ -404,6 +407,8 @@ std::pair<std::vector<Node*>, std::vector<Node*>> gatherIndependentMMUses(
       }
     }
   }
+  std::cerr << "Gathering result: " << lhses.size() << " and " << rhses.size()
+            << "\n";
   return std::make_pair(postprocess(lhses), postprocess(rhses));
 }
 
@@ -440,6 +445,8 @@ void BatchMMSide(Block* block, AliasDb& alias_db) {
           continue;
         }
         auto uses_with_many = gatherIndependentMMUses(input, alias_db);
+        std::cerr << "Gathering result: " << uses_with_many.first.size()
+                  << " and " << uses_with_many.second.size() << "\n";
         if (uses_with_many.first.size() >= how_many_is_many) {
           batch_side(uses_with_many.first, Side::LHS);
         }
@@ -468,10 +475,11 @@ bool hasMutableOperators(Block* block) {
 }
 
 void BatchMM(std::shared_ptr<Graph>& graph) {
-  if (hasMutableOperators(graph->block())) {
-    // TODO(suo): make BatchMM mutability-safe
-    return;
-  }
+//   if (hasMutableOperators(graph->block())) {
+//     // TODO(suo): make BatchMM mutability-safe
+//     return;
+//   }
+  std::cerr << "Before batchMM:\n" << *graph << "\n";
   AliasDb alias_db(graph);
   BatchMMTreeReduce(graph->block());
   BatchMMSide(graph->block(), alias_db);
@@ -479,6 +487,7 @@ void BatchMM(std::shared_ptr<Graph>& graph) {
   // It's possible that transpose rearrangements have created sequences of
   // consecutive transposes that didn't exist before.
   PeepholeOptimize(graph);
+  std::cerr << "After batchMM:\n" << *graph << "\n";
 }
 
 } // namespace jit
