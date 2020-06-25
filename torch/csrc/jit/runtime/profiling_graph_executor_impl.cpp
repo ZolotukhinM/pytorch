@@ -79,6 +79,21 @@ static bool needsGradientInProfilingMode(Block* b) {
   }
   return false;
 }
+void removeProfilingNodes(Block* b) {
+  for (auto it = b->nodes().begin(); it != b->nodes().end(); it++) {
+    if (it->kind() == prim::profile) {
+      if (it->outputs().size()) {
+        it->input()->setType(it->output()->type());
+        it->output()->replaceAllUsesWith(it->input());
+      }
+      it.destroyCurrent();
+    } else {
+      for (Block* ib : it->blocks()) {
+        removeProfilingNodes(ib);
+      }
+    }
+  }
+}
 
 void ProfilingGraphExecutorImpl::runProfilingOptimizations(
     std::shared_ptr<Graph>& copy) {
@@ -88,11 +103,19 @@ void ProfilingGraphExecutorImpl::runProfilingOptimizations(
     return;
   }
 
+  std::cerr << "Before running optimizations:\n" << *copy;
   runOptimization(copy, false);
   if (tensorExprFuserEnabled()) {
+    std::cerr << "Before fusion:\n" << *copy;
     FuseTensorExprs(copy);
+    std::cerr << "Before inserting bailouts:\n" << *copy;
+    InsertBailOuts(copy);
+  } else {
+    std::cerr << "Before removing profiling nodes:\n" << *copy;
+    removeProfilingNodes(copy->block());
   }
-  InsertGuards(copy);
+  std::cerr << "After fusion:\n" << *copy;
+//   InsertGuards(copy);
   LowerGradOf(*copy);
 //   EliminateRedundantGuards(copy);
 //   InsertBailOuts(copy);

@@ -701,6 +701,12 @@ struct CodeImpl {
     return r;
   }
 
+  void emitTypeCheck(Node* node) {
+    // guarded input is at index 0
+    emitLoadInputs(node->inputs());
+    insertInstruction(TYPECHECK, emitType(node->output(0)->type()));
+  }
+
   size_t emitGuard(Node* node) {
     // unoptimized graph is at index 0
     // guarded input is at index 1
@@ -879,6 +885,9 @@ struct CodeImpl {
         } else {
           emitInterfaceCall(node->s(attr::name), node->inputs());
         }
+        break;
+      case prim::TypeCheck:
+        emitTypeCheck(node);
         break;
       case prim::BailOut:
         emitBailOut(node);
@@ -1346,6 +1355,27 @@ struct InterpreterStateImpl : c10::intrusive_ptr_target {
             ++af.pc;
             break;
           }
+          case TYPECHECK: {
+            if (!stack.back().isTensor()) {
+              // stack.back() is an Uninitialized IValue and this is a guard
+              // on a block output. Uninitialized IValues are never used
+              // so it's safe to pass this guard check
+              push(stack, true);
+            } else {
+              auto t = stack.back().toTensor();
+              const TypePtr& expected = af.types[inst.X];
+              auto expected_type = expected->cast<TensorType>();
+              if (t.defined() &&
+                  !frames.back().symbols2dims.bindSymbolicShapes(
+                      t.sizes(), expected_type->symbolic_sizes())) {
+                push(stack, false);
+              } else {
+                push(stack, expected_type->matchTensor(t));
+                push(stack, true);
+              }
+            }
+            ++af.pc;
+          } break;
           case GUARD: {
             if (!stack.back().isTensor()) {
               // stack.back() is an Uninitialized IValue and this is a guard
