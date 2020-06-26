@@ -1025,7 +1025,7 @@ Stmt* TensorExprKernel::generateStmt(BackendType backendType) {
   flattenTensors(backendType);
 
   torch::jit::tensorexpr::LoopNest l(flatTensorOutputs_);
-  std::cerr << "Original Stmt:\n" << *l.root_stmt() << "\n";
+  GRAPH_DEBUG("Original Stmt:\n", std::to_string(l.root_stmt()), "\n");
 
   // Compute non-output tensors_ inline
   for (auto& p : tensors_) {
@@ -1499,7 +1499,6 @@ void TensorExprKernel::runKernel(Stack& stack) {
   std::vector<CodeGen::CallArg> runArgs = prepareRunArgs(inputs, outputs);
 
   // Call the kernel.
-//   std::cerr << "ACTUALLY RUNNING COMPILED KERNEL!\n";
   codegen_->call(runArgs);
 
   // Update the stack.
