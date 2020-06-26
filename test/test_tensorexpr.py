@@ -1234,6 +1234,8 @@ class TestTensorExprFuser(BaseTestClass):
         b = torch.rand(1024, dtype=float)
         traced = torch.jit.trace(run_where, (torch.zeros(1024), torch.zeros(1024)))
         x = traced(a, b)
+        print(traced.graph)
+        print(traced.graph_for(a,b))
         y = run_where(a, b)
         np.testing.assert_allclose(x.numpy(), y.numpy())
 

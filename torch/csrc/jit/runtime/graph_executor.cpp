@@ -779,7 +779,7 @@ void runNondiffOptimization(
 
   if (getProfilingMode()) {
     if (tensorExprFuserEnabled()) {
-      FuseTensorExprs(graph);
+//       FuseTensorExprs(graph);
     }
   } else {
     FuseGraph(graph, strict_fuser_check);

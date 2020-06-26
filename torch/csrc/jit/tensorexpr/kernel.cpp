@@ -1156,6 +1156,7 @@ Stmt* TensorExprKernel::generateStmt(BackendType backendType) {
   Stmt* stmt = l.root_stmt();
   // Arithmetic Simplification.
   stmt = IRSimplifier::simplify(stmt);
+  GRAPH_DEBUG("Final Stmt:\n", std::to_string(stmt), "\n");
   return stmt;
 }
 
