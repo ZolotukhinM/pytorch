@@ -108,8 +108,8 @@ void ProfilingGraphExecutorImpl::runProfilingOptimizations(
   if (tensorExprFuserEnabled()) {
     std::cerr << "Before fusion:\n" << *copy;
     FuseTensorExprs(copy);
-    std::cerr << "Before inserting bailouts:\n" << *copy;
-    InsertBailOuts(copy);
+//     std::cerr << "Before inserting bailouts:\n" << *copy;
+//     InsertBailOuts(copy);
   } else {
     std::cerr << "Before removing profiling nodes:\n" << *copy;
     removeProfilingNodes(copy->block());

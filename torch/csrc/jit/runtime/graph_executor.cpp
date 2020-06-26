@@ -614,7 +614,7 @@ struct GraphExecutorImpl : public GraphExecutorImplBase {
     // Phase 5. Apply non-differentiable optimizations to the graphs we've found
     //          (or the whole graph if we know we won't need its derivative).
     if (needsGradient(opt_graph)) {
-      std::cerr << "Before autodiff subgraphs:\n" << *opt_graph << "\n";
+      GRAPH_DUMP("Before autodiff subgraphs:", opt_graph);
       auto diff_nodes = CreateAutodiffSubgraphs(
           opt_graph,
           autodiff_subgraph_inlining ? autodiffSubgraphNodeThreshold : 1);
@@ -635,7 +635,7 @@ struct GraphExecutorImpl : public GraphExecutorImplBase {
       InlineAutodiffSubgraphs(
           opt_graph,
           autodiff_subgraph_inlining ? autodiffSubgraphInlineThreshold : 1);
-      std::cerr << "After autodiff subgraphs:\n" << *opt_graph << "\n";
+      GRAPH_DUMP("After autodiff subgraphs:", opt_graph);
     } else {
       runNondiffOptimization(opt_graph);
     }

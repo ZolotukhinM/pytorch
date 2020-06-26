@@ -18,6 +18,16 @@ namespace torch {
 namespace jit {
 void CreateFunctionalGraphs2(const std::shared_ptr<Graph>& graph);
 
+/**
+ * TODO:
+ * [ ] Add 2nd argument to prim::TypeCheck to allow chaining them.
+ * [ ] Construct prim::If for fusion group.
+ * [ ] Construct non-optimized graph in else-branch.
+ * [ ] Remove fuser-pass based on functional subgraphs.
+ * [ ] Cleanup.
+ * [ ] Fix tests.
+ */
+
 namespace tensorexpr {
 bool isSupported(Node* node) {
   // TODO:
@@ -366,7 +376,6 @@ void findValuesWithKnownSizes_(
     if (n->kind() == prim::profile && n->outputs().size() == 1 &&
         allShapesAreKnown(n->output())) {
       if (auto tensor_ty = n->output()->type()->cast<TensorType>()) {
-        std::cerr << "Known type for: %" << n->input()->debugName() << "; type: " << *tensor_ty << "\n";
         value_types[n->input()] = tensor_ty;
       }
     }
@@ -380,33 +389,61 @@ void findValuesWithKnownSizes_(
 void insertGuards(
     Block* b,
     std::unordered_map<Value*, TensorTypePtr> value_types) {
-  for (auto it = b->nodes().begin(); it != b->nodes().end(); it++) {
-    if (it->kind() == getTensorExprSymbol()) {
-      // Fixup types in subgraph inputs
-      auto te_g = it->g(attr::Subgraph);
-      for (size_t idx = 0; idx < te_g->inputs().size(); idx++) {
-        auto inp = it->input(idx);
-        if (value_types.count(inp) && value_types.at(inp)->isComplete()) {
-          te_g->inputs().at(idx)->setType(value_types.at(inp));
-        }
-      }
-
-      // Add guard for inputs
-      for (auto inp : it->inputs()) {
-        if (value_types.count(inp) && value_types.at(inp)->isComplete()) {
-          auto guard = b->owningGraph()->create(prim::Guard, {inp}, 1);
-          auto go = guard->output();
-          go->setType(value_types.at(inp));
-          guard->insertBefore(*it);
-          inp->replaceAllUsesWith(go);
-          guard->replaceInput(0, inp);
-        }
-      }
-
-    } else {
+  for (auto it = b->nodes().begin(); it != b->nodes().end();) {
+    if (it->kind() != getTensorExprSymbol()) {
       for (Block* ib : it->blocks()) {
         insertGuards(ib, value_types);
       }
+      it++;
+      continue;
+    }
+
+    // Fixup types in subgraph inputs
+    auto te_g = it->g(attr::Subgraph);
+    for (size_t idx = 0; idx < te_g->inputs().size(); idx++) {
+      auto inp = it->input(idx);
+      if (value_types.count(inp) && value_types.at(inp)->isComplete()) {
+        te_g->inputs().at(idx)->setType(value_types.at(inp));
+      }
+    }
+
+    // Add guard for inputs
+    Value* check_result;
+    for (auto inp : it->inputs()) {
+      if (value_types.count(inp) && value_types.at(inp)->isComplete()) {
+        auto guard = b->owningGraph()->create(prim::TypeCheck, {inp}, 2);
+        auto go0 = guard->output(0);
+        check_result = guard->output(1);
+        go0->setType(value_types.at(inp));
+        check_result->setType(BoolType::get());
+        guard->insertBefore(*it);
+        inp->replaceAllUsesWith(go0);
+        guard->replaceInput(0, inp);
+      }
+    }
+
+    auto fusion_group = *it;
+    it++;
+    auto versioning_if = b->owningGraph()->create(
+        prim::If, {check_result}, fusion_group->outputs().size());
+    for (size_t i = 0; i < fusion_group->outputs().size(); ++i) {
+      fusion_group->output(i)->replaceAllUsesWith(versioning_if->output(i));
+    }
+    versioning_if->insertAfter(fusion_group);
+    auto true_block = versioning_if->addBlock();
+    auto false_block = versioning_if->addBlock();
+    fusion_group->moveBefore(true_block->return_node());
+//     auto fusion_group_clone =
+//         b->owningGraph()->createClone(fusion_group, [](Value* v) { return v; });
+
+    WithInsertPoint guard(false_block->return_node());
+    const auto subgraphOutputs = insertGraph(
+        *b->owningGraph(), *fusion_group->g(attr::Subgraph), fusion_group->inputs());
+//     fusion_group_clone->insertBefore(false_block->return_node());
+
+    for (size_t i = 0; i < fusion_group->outputs().size(); ++i) {
+      true_block->registerOutput(fusion_group->output(i));
+      false_block->registerOutput(subgraphOutputs[i]);
     }
   }
 }
@@ -463,7 +500,9 @@ void FuseTensorExprs(std::shared_ptr<Graph>& graph) {
       }
     }
   }
+  GRAPH_DUMP("Before inserting checks:\n", graph);
   insertGuards(graph->block(), value_types);
+  GRAPH_DUMP("After inserting checks:\n", graph);
 
   EliminateCommonSubexpression(graph);
   EliminateDeadCode(graph);
@@ -481,12 +520,8 @@ struct FunctionalGraphSlicer2 {
 
   void run() {
     findValuesWithKnownSizes(graph_->block());
-//     for (auto kv : value_types_) {
-//       std::cerr << "Value: %" << kv.first->debugName() << ", type: " << *kv.second << "\n";
-//     }
 
     removeProfilingNodes(graph_->block());
-//     return;
     bool changed = true;
     // TODO: more sane strategy
     size_t MAX_NUM_ITERATIONS = 4;
@@ -1017,16 +1052,13 @@ Operation createTensorExprOp(const Node* node) {
   auto kernel =
       std::make_shared<tensorexpr::TensorExprKernel>(node->g(attr::Subgraph));
   return [kernel](Stack& stack) {
-//     std::cerr << "111 RUNNING COMPILED KERNEL!\n";
     RECORD_FUNCTION("TensorExpr", std::vector<c10::IValue>());
     if (!tensorexpr::fallbackAllowed()) {
-//       std::cerr << "222 RUNNING COMPILED KERNEL!\n";
       kernel->run(stack);
       return 0;
     }
 
     try {
-//       std::cerr << "RUNNING COMPILED KERNEL!\n";
       kernel->run(stack);
     } catch (const std::runtime_error& e) {
       kernel->fallback(stack);
