@@ -885,10 +885,11 @@ class TestTensorExprFuser(BaseTestClass):
 
         for torch_fn in fns:
             for dev in device_options:
-                rand_a = torch.rand(1024, device=dev)
-                rand_b = torch.rand(1024, device=dev)
-                ins = 20 * torch.rand(1024, device=dev)
-                cc = np.array(1024, dtype=float)
+                N = 16
+                rand_a = torch.rand(N, device=dev)
+                rand_b = torch.rand(N, device=dev)
+                ins = 20 * torch.rand(N, device=dev)
+                cc = np.empty([N], dtype=np.float32)
                 cc.fill(np.nan)
                 nans = torch.from_numpy(cc).to(dev)
                 traced = torch.jit.trace(torch_fn, (ins, ins))
@@ -955,7 +956,7 @@ class TestTensorExprFuser(BaseTestClass):
         a = torch.rand(1024, dtype=float)
         b = torch.rand(1024, dtype=float)
         zeros = torch.zeros(1024, dtype=float)
-        cc = np.array(1024, dtype=float)
+        cc = np.empty([1024], dtype=np.float32)
         cc.fill(np.nan)
         nans = torch.from_numpy(cc)
 
