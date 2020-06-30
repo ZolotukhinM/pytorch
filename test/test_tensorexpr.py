@@ -881,6 +881,7 @@ class TestTensorExprFuser(BaseTestClass):
             test_relu,
         }
         device_options = ["cpu", "cuda"] if torch.cuda.is_available() else ['cpu']
+        device_options = ["cuda"] if torch.cuda.is_available() else []
 
         for torch_fn in fns:
             for dev in device_options:
@@ -898,7 +899,13 @@ class TestTensorExprFuser(BaseTestClass):
                 traced = torch.jit.trace(torch_fn, (ins, ins))
                 x = traced(nans, rand_b)
                 y = torch_fn(nans, rand_b)
-                np.testing.assert_allclose(x.cpu().numpy(), y.cpu().numpy())
+                try:
+                    np.testing.assert_allclose(x.cpu().numpy(), y.cpu().numpy())
+                except Exception as e:
+                    print(torch_fn)
+                    print(e)
+                    print(dev)
+                    raise e
 
 
     def test_rand_like(self):
@@ -1228,14 +1235,21 @@ class TestTensorExprFuser(BaseTestClass):
 
     def test_where(self):
         def run_where(x, y):
-            return torch.where(torch.gt(x, y), x, y)
+            print(x[16:24])
+            print(y[16:24])
+            t = torch.where(torch.gt(x, y), x, y)
+            print(t[16:24])
+            return t
 
         a = torch.rand(1024, dtype=float)
         b = torch.rand(1024, dtype=float)
-        traced = torch.jit.trace(run_where, (torch.zeros(1024), torch.zeros(1024)))
+#         traced = torch.jit.trace(run_where, (torch.zeros(1024), torch.zeros(1024)))
+        traced = torch.jit.script(run_where)
+        print('JIT')
         x = traced(a, b)
         print(traced.graph)
         print(traced.graph_for(a,b))
+        print('Eager')
         y = run_where(a, b)
         np.testing.assert_allclose(x.numpy(), y.numpy())
 

@@ -386,6 +386,38 @@ void findValuesWithKnownSizes_(
   }
 }
 
+/*
+*** INSERT GUARDS TRANSFORMATION ***
+
+Original IR:
+```
+  %a, %b = tensorexpr::Group_0(%x, %y)
+  ...
+with tensorexpr::Group_0 = graph(%p : Tensor, %q : Tensor):
+  %v = aten::gt(%p, %q)
+  %w = aten::where(%v, %p, %q)
+  return (%v, %w)
+```
+
+Should be transformed to:
+```
+  %x1 : Double(...), %check_x : bool = prim::TypeCheck(%x, true)
+  %y1 : Double(...), %check_xy : bool = prim::TypeCheck(%y, %check_x)
+  %a1, %b1 = prim::If(%check_xy)
+    block0():
+      %a, %b = tensorexpr::Group_0(%x1, %y1)
+      -> (%a, %b)
+    block1():
+      %v1 = aten::gt(%x, %y)
+      %w1 = aten::where(%v1, %x, %y)
+      -> (%v1, %w1)
+  ...
+with tensorexpr::Group_0 = graph(%p : Double(...), %q : Double(...)):
+  %v = aten::gt(%p, %q)
+  %w = aten::where(%v, %p, %q)
+  return (%v, %w)
+```
+ */
 void insertGuards(
     Block* b,
     std::unordered_map<Value*, TensorTypePtr> value_types) {
@@ -409,6 +441,7 @@ void insertGuards(
 
     // Add guard for inputs
     Value* check_result;
+    std::unordered_map<Value*, Value*> checked_values;
     for (auto inp : it->inputs()) {
       if (value_types.count(inp) && value_types.at(inp)->isComplete()) {
         auto guard = b->owningGraph()->create(prim::TypeCheck, {inp}, 2);
@@ -417,15 +450,16 @@ void insertGuards(
         go0->setType(value_types.at(inp));
         check_result->setType(BoolType::get());
         guard->insertBefore(*it);
-        inp->replaceAllUsesWith(go0);
-        guard->replaceInput(0, inp);
+        checked_values[inp] = go0;
       }
     }
+    // checked_values = {x -> x1, y -> y1}
 
     auto fusion_group = *it;
     it++;
     auto versioning_if = b->owningGraph()->create(
         prim::If, {check_result}, fusion_group->outputs().size());
+
     for (size_t i = 0; i < fusion_group->outputs().size(); ++i) {
       fusion_group->output(i)->replaceAllUsesWith(versioning_if->output(i));
     }
@@ -433,14 +467,14 @@ void insertGuards(
     auto true_block = versioning_if->addBlock();
     auto false_block = versioning_if->addBlock();
     fusion_group->moveBefore(true_block->return_node());
-//     auto fusion_group_clone =
-//         b->owningGraph()->createClone(fusion_group, [](Value* v) { return v; });
 
     WithInsertPoint guard(false_block->return_node());
     const auto subgraphOutputs = insertGraph(
         *b->owningGraph(), *fusion_group->g(attr::Subgraph), fusion_group->inputs());
-//     fusion_group_clone->insertBefore(false_block->return_node());
 
+    for (size_t i = 0; i < fusion_group->inputs().size(); ++i) {
+      fusion_group->replaceInput(i, checked_values.at(fusion_group->input(i)));
+    }
     for (size_t i = 0; i < fusion_group->outputs().size(); ++i) {
       true_block->registerOutput(fusion_group->output(i));
       false_block->registerOutput(subgraphOutputs[i]);

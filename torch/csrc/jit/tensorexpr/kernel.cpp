@@ -528,7 +528,7 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
     case aten::gt: {
       return computeTwoOperand(
           "aten_gt", v, [](const ExprHandle& lhs, const ExprHandle& rhs) {
-            return lhs > rhs;
+            return cast<bool>(lhs > rhs);
           });
     } break;
 
