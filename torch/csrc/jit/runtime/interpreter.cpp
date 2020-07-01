@@ -1357,26 +1357,32 @@ struct InterpreterStateImpl : c10::intrusive_ptr_target {
           }
           case TYPECHECK: {
 //             dump(std::cout, stack);
-            if (!stack.back().isTensor()) {
-              // stack.back() is an Uninitialized IValue and this is a guard
-              // on a block output. Uninitialized IValues are never used
-              // so it's safe to pass this guard check
+            bool cond = stack.back().toBool();
+            if (cond) {
+              pop(stack);
+              if (!stack.back().isTensor()) {
+                // stack.back() is an Uninitialized IValue and this is a guard
+                // on a block output. Uninitialized IValues are never used
+                // so it's safe to pass this guard check
 //               std::cout << "Typecheck\nNonTensor\n";
-              push(stack, true);
-            } else {
-              auto t = stack.back().toTensor();
-              const TypePtr& expected = af.types[inst.X];
-              auto expected_type = expected->cast<TensorType>();
-//               std::cout << "Typecheck\nTensor:\n" << stack.back() << "\nExpected type: " << *expected_type << "\n";
-              if (t.defined() &&
-                  !frames.back().symbols2dims.bindSymbolicShapes(
-                      t.sizes(), expected_type->symbolic_sizes())) {
-//                 std::cout << "TypeCheck yields FALSE\n";
-                push(stack, false);
+                push(stack, true);
               } else {
+                auto t = stack.back().toTensor();
+                const TypePtr& expected = af.types[inst.X];
+                auto expected_type = expected->cast<TensorType>();
+//               std::cout << "Typecheck\nTensor:\n" <<
+//               stack.back() << "\nExpected type: " <<
+//               *expected_type << "\n";
+                if (t.defined() &&
+                    !frames.back().symbols2dims.bindSymbolicShapes(
+                        t.sizes(), expected_type->symbolic_sizes())) {
+//                 std::cout << "TypeCheck yields FALSE\n";
+                  push(stack, false);
+                } else {
 //                 push(stack, expected_type->matchTensor(t));
 //                 std::cout << "TypeCheck yields TRUE\n";
-                push(stack, true);
+                  push(stack, true);
+                }
               }
             }
             ++af.pc;

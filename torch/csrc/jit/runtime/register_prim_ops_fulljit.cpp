@@ -55,7 +55,7 @@ RegisterOperators reg(
          },
          aliasAnalysisFromSchema()),
      Operator(
-         "prim::TypeCheck(Tensor(a) x) -> (Tensor(a), bool)",
+         "prim::TypeCheck(Tensor(a) x, bool y) -> (Tensor(a), bool)",
          [](Stack& /* stack */) {
            AT_ERROR("prim::TypeCheck not yet implemented"); // NOLINT
            return 0;

@@ -442,10 +442,12 @@ void insertGuards(
     // Add guard for inputs
     Value* check_result;
     std::unordered_map<Value*, Value*> checked_values;
+    Value* cond = b->owningGraph()->insertConstant(true);
     for (auto inp : it->inputs()) {
       if (value_types.count(inp) && value_types.at(inp)->isComplete()) {
-        auto guard = b->owningGraph()->create(prim::TypeCheck, {inp}, 2);
+        auto guard = b->owningGraph()->create(prim::TypeCheck, {inp, cond}, 2);
         auto go0 = guard->output(0);
+        cond = guard->output(1);
         check_result = guard->output(1);
         go0->setType(value_types.at(inp));
         check_result->setType(BoolType::get());
